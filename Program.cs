@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using System.Text;
 
 namespace NetworkSimplex
 {
@@ -63,14 +65,43 @@ f -> g 24
 g -> b 33
 g -> e 19";
 
+            testGraph = @"
+a -1
+b 1
+c -1
+d 1
+
+b -> a 3
+b -> c -7
+d -> a -2
+d -> c -9
+";
+
             FlowGraph graph = Build(testGraph);
             FlowGraphSolution solution = graph.Solve();
 
+            double cost = graph.Arcs.Select((a, i) => a.Cost * solution.Flows[i]).Sum();
+            Console.WriteLine("Cost: {0}", cost);
             for (int i = 0; i < graph.Arcs.Count; i++)
             {
                 FlowArc arc = graph.Arcs[i];
                 if (solution.Flows[i] > 0)
                     Console.WriteLine("{0} -> {1} flows {2}", (char)('a' + arc.Source), (char)('a' + arc.Target), solution.Flows[i]);
+            }
+
+            Console.WriteLine("LP program:");
+            Console.WriteLine("min: {0};", string.Join(" + ", graph.Arcs.Where(a => a.Cost != 0).Select(a => FormattableString.Invariant($"{a.Cost}*a_{a.Source}_{a.Target}"))));
+            foreach (var node in graph.Nodes)
+            {
+                StringBuilder sb = new StringBuilder();
+                foreach (var outgoing in graph.GetOutgoingArcs(node))
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "a_{0}_{1} + ", graph.Arcs[outgoing].Source, graph.Arcs[outgoing].Target);
+
+                foreach (var incoming in graph.GetIncomingArcs(node))
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "-a_{0}_{1} + ", graph.Arcs[incoming].Source, graph.Arcs[incoming].Target);
+
+                if (sb.Length > 0)
+                    Console.WriteLine("{0} = {1};", sb.ToString(0, sb.Length - 3), node.Balance);
             }
             Console.ReadLine();
         }
