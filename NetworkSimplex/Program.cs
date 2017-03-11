@@ -63,8 +63,7 @@ f -> b 48
 f -> c 108
 f -> g 24
 g -> b 33
-g -> e 19";
-
+g -> e 19"; 
             testGraph = @"
 a -1
 b 1
