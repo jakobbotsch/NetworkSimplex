@@ -12,9 +12,9 @@ namespace NetworkSimplex
         public IReadOnlyList<FlowNodeBuilder> Nodes => _nodes;
         public IReadOnlyList<FlowArcBuilder> Arcs => _arcs;
 
-        public FlowNodeBuilder AddNode(double balance = 0)
+        public FlowNodeBuilder AddNode(double supply = 0)
         {
-            var node = new FlowNodeBuilder { Balance = balance };
+            var node = new FlowNodeBuilder { Supply = supply };
             _nodes.Add(node);
             return node;
         }
@@ -61,7 +61,7 @@ namespace NetworkSimplex
                     throw new InvalidOperationException("Not all arcs are connected");
             }
 
-            if (Math.Abs(_nodes.Sum(n => n.Balance)) > 0.00001)
+            if (Math.Abs(_nodes.Sum(n => n.Supply)) > 0.00001)
                 throw new InvalidOperationException("The balance constraint is not satisfied");
 
             foreach (var arc in _arcs)
@@ -86,7 +86,7 @@ namespace NetworkSimplex
             }
 
             return new FlowGraph(
-                _nodes.Select(n => n.Balance),
+                _nodes.Select(n => n.Supply),
                 GetArcs());
         }
     }
@@ -98,7 +98,7 @@ namespace NetworkSimplex
         }
 
         internal int Index { get; set; }
-        public double Balance { get; set; }
+        public double Supply { get; set; }
     }
 
     public class FlowArcBuilder

@@ -100,7 +100,7 @@ d -> c -9
                     sb.AppendFormat(CultureInfo.InvariantCulture, "-a_{0}_{1} + ", graph.Arcs[incoming].Source, graph.Arcs[incoming].Target);
 
                 if (sb.Length > 0)
-                    Console.WriteLine("{0} = {1};", sb.ToString(0, sb.Length - 3), node.Balance);
+                    Console.WriteLine("{0} = {1};", sb.ToString(0, sb.Length - 3), node.Supply);
             }
             Console.ReadLine();
         }
@@ -142,14 +142,14 @@ d -> c -9
                     continue;
                 }
 
-                if (!double.TryParse(split[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double balance))
+                if (!double.TryParse(split[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double supply))
                 {
-                    Console.WriteLine("Error: Could not parse balance on line '{0}'", line);
+                    Console.WriteLine("Error: Could not parse supply on line '{0}'", line);
                     error = true;
                     continue;
                 }
 
-                nodes.Add(nodeName, graph.AddNode(balance));
+                nodes.Add(nodeName, graph.AddNode(supply));
             }
 
             foreach ((string[] split, string line) in EnumerateLines())

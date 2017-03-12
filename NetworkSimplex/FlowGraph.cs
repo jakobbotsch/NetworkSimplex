@@ -11,19 +11,19 @@ namespace NetworkSimplex
         private readonly FlowArc[] _arcs;
         private readonly int[] _nodeArcs;
 
-        public FlowGraph(IEnumerable<double> nodeBalances, IEnumerable<FlowArc> arcs)
+        public FlowGraph(IEnumerable<double> nodeSupplies, IEnumerable<FlowArc> arcs)
         {
-            if (nodeBalances == null)
-                throw new ArgumentNullException(nameof(nodeBalances));
+            if (nodeSupplies == null)
+                throw new ArgumentNullException(nameof(nodeSupplies));
 
             if (arcs == null)
                 throw new ArgumentNullException(nameof(arcs));
 
-            double[] nodeBalancesArr = nodeBalances.ToArray();
-            int numNodes = nodeBalancesArr.Length;
+            double[] nodeSupplyArr = nodeSupplies.ToArray();
+            int numNodes = nodeSupplyArr.Length;
 
-            if (Math.Abs(nodeBalancesArr.Sum(d => d)) > 0.00001)
-                throw new ArgumentException("Balance constraint is not satisfied by nodes", nameof(nodeBalances));
+            if (Math.Abs(nodeSupplyArr.Sum(d => d)) > 0.00001)
+                throw new ArgumentException("Balance constraint is not satisfied by nodes", nameof(nodeSupplies));
 
             FlowArc[] arcsArr = arcs.ToArray();
             foreach (FlowArc arc in arcsArr)
@@ -51,7 +51,7 @@ namespace NetworkSimplex
             int count = 0;
             for (int i = 0; i < numNodes; i++)
             {
-                nodes[i] = new FlowNode(i, nodeBalancesArr[i], count, inCounts[i], outCounts[i]);
+                nodes[i] = new FlowNode(i, nodeSupplyArr[i], count, inCounts[i], outCounts[i]);
 
                 writeIndices[i * 2 + 0] = count;
                 count += inCounts[i];
@@ -149,7 +149,7 @@ namespace NetworkSimplex
             {
                 FlowNode node = _graph._nodes[root];
                 ref NodeState nodeState = ref _nodeStates[root];
-                nodeState.Supply = node.Balance;
+                nodeState.Supply = node.Supply;
 
                 for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
                 {
@@ -234,7 +234,7 @@ namespace NetworkSimplex
             {
                 FlowArc enteringArc = _graph._arcs[enteringArcIndex];
                 ref ArcState enteringArcState = ref _arcStates[enteringArcIndex];
-                Console.WriteLine("Entering (primal privot) {0} -> {1}", (char)('a' + enteringArc.Source), (char)('a' + enteringArc.Target));
+                Console.WriteLine("Entering (primal privot) {0} -> {1} with dual slack {2}", (char)('a' + enteringArc.Source), (char)('a' + enteringArc.Target), enteringArcState.Value);
 
                 FindCycleOnArcAddition(enteringArcIndex);
                 Console.Write("Cycle is:");
@@ -337,6 +337,7 @@ namespace NetworkSimplex
                     int parArcIndex = _nodeStates[cur].ParentArcOrTag;
                     FlowArc parArc = _graph._arcs[parArcIndex];
                     ref ArcState parArcState = ref _arcStates[parArcIndex];
+                    double old = parArcState.Value;
                     if (parArc.Source == cur)
                     {
                         parArcState.Value -= flow;
@@ -347,11 +348,14 @@ namespace NetworkSimplex
                         parArcState.Value += flow;
                         cur = parArc.Source;
                     }
+
+                    Console.WriteLine("Updating flow on {0} -> {1} from {2} to {3}", (char)('a' + parArc.Source), (char)('a' + parArc.Target), old, parArcState.Value);
                 } while (cur != enteringArc.Target);
 
                 // Enter pivoting arc and leave the lowest one.
                 enteringArcState.IsTree = true;
                 enteringArcState.Value = flow;
+                Console.WriteLine("{0} -> {1} is new tree edge with {2} flow", (char)('a' + enteringArc.Source), (char)('a' + enteringArc.Target), flow);
                 _arcStates[leavingArcIndex].IsTree = false;
 
                 // Recompute dual and slack variables
@@ -434,8 +438,9 @@ namespace NetworkSimplex
             private bool DualPivot(int leavingArcIndex)
             {
                 FlowArc leavingArc = _graph._arcs[leavingArcIndex];
-                Console.WriteLine("Leaving (dual pivot) {0} -> {1}", (char)('a' + leavingArc.Source), (char)('a' + leavingArc.Target));
                 ref ArcState leavingArcState = ref _arcStates[leavingArcIndex];
+
+                Console.WriteLine("Leaving (dual pivot) {0} -> {1} with flow {2}", (char)('a' + leavingArc.Source), (char)('a' + leavingArc.Target), leavingArcState.Value);
 
                 leavingArcState.IsTree = false;
                 // Tag part of tree that still contains root
@@ -532,22 +537,22 @@ namespace NetworkSimplex
 
     public class FlowNode
     {
-        internal FlowNode(int index, double balance, int arcsIndex, int countIn, int countOut)
+        internal FlowNode(int index, double suppply, int arcsIndex, int countIn, int countOut)
         {
             Index = index;
-            Balance = balance;
+            Supply = suppply;
             ArcsIndex = arcsIndex;
             CountIn = countIn;
             CountOut = countOut;
         }
 
         public int Index { get; }
-        public double Balance { get; }
+        public double Supply { get; }
         internal int ArcsIndex { get; }
         internal int CountIn { get; }
         internal int CountOut { get; }
 
-        public override string ToString() => FormattableString.Invariant($"#{Index} Balance {Balance}");
+        public override string ToString() => FormattableString.Invariant($"#{Index} Supply {Supply}");
     }
 
     public class FlowArc
