@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 
 namespace NetworkSimplex
 {
@@ -111,9 +111,10 @@ namespace NetworkSimplex
             private readonly FlowGraph _graph;
             private readonly NodeState[] _nodeStates;
             private readonly ArcState[] _arcStates;
-            private readonly Stack<int> stack = new Stack<int>();
-            private int _tag = 0;
-            private int _seen = 0;
+            private readonly Stack<int> _stack = new Stack<int>();
+            private readonly Queue<int> _queue = new Queue<int>();
+            private int _tag;
+            private int _seen;
 
             public FlowGraphSolver(FlowGraph graph)
             {
@@ -124,13 +125,12 @@ namespace NetworkSimplex
 
             public FlowGraphSolution Solve()
             {
-                _seen++;
                 _nodeStates[0].InTree = true;
                 // Compute initial spanning tree, primal variables, dual variables and dual slack variables.
                 // Always use first node as root.
                 InitialVisit(0);
 
-                if (_seen < _graph._nodes.Length)
+                if (_seen != _graph._nodes.Length)
                     throw new InvalidOperationException("Flow graph is not connected");
 
                 while (true)
@@ -147,18 +147,25 @@ namespace NetworkSimplex
             /// </summary>
             private void InitialVisit(int root)
             {
-                FlowNode node = _graph._nodes[root];
-                ref NodeState nodeState = ref _nodeStates[root];
+                FlowNode[] nodes = _graph._nodes;
+                int[] nodeArcs = _graph._nodeArcs;
+                FlowArc[] arcs = _graph._arcs;
+                NodeState[] nodeStates = _nodeStates;
+                ArcState[] arcStates = _arcStates;
+
+                FlowNode node = nodes[root];
+                ref NodeState nodeState = ref nodeStates[root];
                 nodeState.Supply = node.Supply;
+                _seen++;
 
                 for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
                 {
-                    int arcId = _graph._nodeArcs[i];
-                    FlowArc arc = _graph._arcs[arcId];
-                    ref ArcState arcState = ref _arcStates[arcId];
+                    int arcIndex = nodeArcs[i];
+                    FlowArc arc = arcs[arcIndex];
+                    ref ArcState arcState = ref arcStates[arcIndex];
 
                     int nei = arc.Source == root ? arc.Target : arc.Source;
-                    ref NodeState neiState = ref _nodeStates[nei];
+                    ref NodeState neiState = ref nodeStates[nei];
                     if (neiState.InTree)
                     {
                         // Non-tree edge. Compute slack
@@ -168,11 +175,9 @@ namespace NetworkSimplex
                         else
                             arcState.Value = neiState.DualValue + arc.Cost - nodeState.DualValue;
 
-                        Console.WriteLine("{0} -> {1} is assigned slack {2}", (char)('a' + arc.Source), (char)('a' + arc.Target), arcState.Value);
                         continue;
                     }
 
-                    _seen++;
                     neiState.InTree = true;
                     arcState.IsTree = true;
 
@@ -182,8 +187,6 @@ namespace NetworkSimplex
                         neiState.DualValue = arc.Cost + nodeState.DualValue;
                     else
                         neiState.DualValue = nodeState.DualValue - arc.Cost;
-
-                    Console.WriteLine("{0} gets dual value {1}", (char)('a' + nei), neiState.DualValue);
 
                     InitialVisit(nei);
 
@@ -196,15 +199,17 @@ namespace NetworkSimplex
 
                     // In any case we move the supply from neighbor to root
                     nodeState.Supply += neiState.Supply;
-                    Console.WriteLine("{0} -> {1} is tree edge with {2} flow", (char)('a' + arc.Source), (char)('a' + arc.Target), arcState.Value);
                 }
             }
 
             private FlowGraphSolution PivotStep()
             {
-                for (int i = 0; i < _graph._arcs.Length; i++)
+                FlowArc[] arcs = _graph._arcs;
+                ArcState[] arcStates = _arcStates;
+
+                for (int i = 0; i < arcs.Length; i++)
                 {
-                    if (_arcStates[i].IsTree || _arcStates[i].Value >= 0)
+                    if (arcStates[i].IsTree || arcStates[i].Value >= 0)
                         continue;
 
                     if (!PrimalPivot(i))
@@ -213,9 +218,9 @@ namespace NetworkSimplex
                     return null;
                 }
 
-                for (int i = 0; i < _graph._arcs.Length; i++)
+                for (int i = 0; i < arcs.Length; i++)
                 {
-                    if (!_arcStates[i].IsTree || _arcStates[i].Value >= 0)
+                    if (!arcStates[i].IsTree || arcStates[i].Value >= 0)
                         continue;
 
                     if (!DualPivot(i))
@@ -224,7 +229,7 @@ namespace NetworkSimplex
                     return null;
                 }
 
-                return new FlowGraphSolution(SolutionType.Feasible, _arcStates.Select(a => a.IsTree ? a.Value : 0).ToArray());
+                return new FlowGraphSolution(SolutionType.Feasible, arcStates.Select(a => a.IsTree ? a.Value : 0).ToArray());
             }
 
             /// <summary>
@@ -232,12 +237,14 @@ namespace NetworkSimplex
             /// </summary>
             private bool PrimalPivot(int enteringArcIndex)
             {
-                FlowArc enteringArc = _graph._arcs[enteringArcIndex];
-                ref ArcState enteringArcState = ref _arcStates[enteringArcIndex];
-                Console.WriteLine("Entering (primal privot) {0} -> {1} with dual slack {2}", (char)('a' + enteringArc.Source), (char)('a' + enteringArc.Target), enteringArcState.Value);
+                FlowArc[] arcs = _graph._arcs;
+                NodeState[] nodeStates = _nodeStates;
+                ArcState[] arcStates = _arcStates;
+
+                FlowArc enteringArc = arcs[enteringArcIndex];
+                ref ArcState enteringArcState = ref arcStates[enteringArcIndex];
 
                 FindCycleOnArcAddition(enteringArcIndex);
-                Console.Write("Cycle is:");
                 // Find smallest flow in cycle that runs in the opposite direction of entering arc.
                 // This could be done directly in the loop above as CPU/memory trade-off.
                 double flow = double.MaxValue;
@@ -245,10 +252,9 @@ namespace NetworkSimplex
                 int cur = enteringArc.Source;
                 do
                 {
-                    Console.Write(" {0}", (char)('a' + cur));
-                    int parArcIndex = _nodeStates[cur].ParentArcOrTag;
-                    FlowArc parArc = _graph._arcs[parArcIndex];
-                    ref ArcState parArcState = ref _arcStates[parArcIndex];
+                    int parArcIndex = nodeStates[cur].ParentCycleIndex;
+                    FlowArc parArc = arcs[parArcIndex];
+                    ref ArcState parArcState = ref arcStates[parArcIndex];
                     if (parArc.Source == cur)
                     {
                         // This is the opposite direction of entering arc.
@@ -267,16 +273,12 @@ namespace NetworkSimplex
 
                 } while (cur != enteringArc.Target);
 
-                Console.WriteLine(" {0}", (char)('a' + cur));
-
                 if (leavingArcIndex == -1)
-                {
-                    // Unbounded
                     return false;
-                }
 
-                Console.WriteLine("Leaving arc is {0} -> {1}. Sending {2} flow around", (char)('a' + _graph._arcs[leavingArcIndex].Source), (char)('a' + _graph._arcs[leavingArcIndex].Target), flow);
-                UpdateTreeForCycle(enteringArcIndex, leavingArcIndex, flow);
+                bool updateSource = TagSubTree(leavingArcIndex);
+
+                UpdateTreeForCycle(enteringArcIndex, leavingArcIndex, flow, updateSource);
                 return true;
             }
 
@@ -286,57 +288,143 @@ namespace NetworkSimplex
             /// </summary>
             private void FindCycleOnArcAddition(int arcIndex)
             {
-                FlowArc enteringArc = _graph._arcs[arcIndex];
-                ref ArcState enteringArcState = ref _arcStates[arcIndex];
+                FlowNode[] nodes = _graph._nodes;
+                int[] nodeArcs = _graph._nodeArcs;
+                FlowArc[] arcs = _graph._arcs;
+                NodeState[] nodeStates = _nodeStates;
+                ArcState[] arcStates = _arcStates;
+                Queue<int> queue = _queue;
 
-                stack.Clear();
-                stack.Push(enteringArc.Target);
-                _nodeStates[enteringArc.Target].ParentArcOrTag = arcIndex;
+                FlowArc enteringArc = arcs[arcIndex];
+                ref ArcState enteringArcState = ref arcStates[arcIndex];
+
+                int tag = ++_tag;
+                // BFS is best in practice.
+                queue.Clear();
+                queue.Enqueue(enteringArc.Target);
+                nodeStates[enteringArc.Target].ParentCycleIndex = arcIndex;
+                nodeStates[enteringArc.Target].Tag = tag;
 
                 // Find cycle when arcIndex enters.
                 while (true)
                 {
-                    int nodeIndex = stack.Pop();
-                    FlowNode node = _graph._nodes[nodeIndex];
-                    ref NodeState nodeState = ref _nodeStates[nodeIndex];
+                    int nodeIndex = queue.Dequeue();
+                    FlowNode node = nodes[nodeIndex];
+                    ref NodeState nodeState = ref nodeStates[nodeIndex];
 
                     for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
                     {
-                        int neiArcIndex = _graph._nodeArcs[i];
-                        // Only follow tree edges and do not expand backwards.
-                        if (!_arcStates[neiArcIndex].IsTree || nodeState.ParentArcOrTag == neiArcIndex)
+                        int neiArcIndex = nodeArcs[i];
+                        // Only follow tree edges
+                        if (!arcStates[neiArcIndex].IsTree)
                             continue;
 
-                        FlowArc neiArc = _graph._arcs[neiArcIndex];
+                        FlowArc neiArc = arcs[neiArcIndex];
                         int neiNodeIndex = neiArc.Source == nodeIndex ? neiArc.Target : neiArc.Source;
-                        _nodeStates[neiNodeIndex].ParentArcOrTag = neiArcIndex;
+                        ref NodeState neiNodeState = ref nodeStates[neiNodeIndex];
+                        if (neiNodeState.Tag == tag)
+                            continue;
+
+                        neiNodeState.ParentCycleIndex = neiArcIndex;
                         // When we find the source of the arc we are pivoting on we have found the full cycle.
                         // Get out of the loop ASAP.
                         if (neiNodeIndex == enteringArc.Source)
                             return;
 
-                        stack.Push(neiNodeIndex);
+                        neiNodeState.Tag = tag;
+                        queue.Enqueue(neiNodeIndex);
                     }
                 }
             }
 
             /// <summary>
-            /// Updates the current tree by respectively removing and adding the specified arcs.
-            /// This method expects the cycle containing the arcs to be stored in the node states.
-            /// The specified flow is pushed along the cycle before the arcs or added and removed.
+            /// Simulates removing the specified arc and then tags the sub-tree containing
+            /// the source node. Returns true if the smallest sub-tree is the one containing
+            /// the source node.
             /// </summary>
-            private bool UpdateTreeForCycle(int enteringArcIndex, int leavingArcIndex, double flow)
+            private bool TagSubTree(int leavingArcIndex)
             {
-                FlowArc enteringArc = _graph._arcs[enteringArcIndex];
-                ref ArcState enteringArcState = ref _arcStates[enteringArcIndex];
+                FlowNode[] nodes = _graph._nodes;
+                int[] nodeArcs = _graph._nodeArcs;
+                FlowArc[] arcs = _graph._arcs;
+                NodeState[] nodeStates = _nodeStates;
+                ArcState[] arcStates = _arcStates;
+                Stack<int> stack = _stack;
 
-                // Send flow around in cycle.
+                FlowArc leavingArc = arcs[leavingArcIndex];
+                ref ArcState leavingArcState = ref arcStates[leavingArcIndex];
+
+                leavingArcState.IsTree = false;
+
+                int tag = ++_tag;
+                int count = 0;
+
+                stack.Clear();
+                stack.Push(leavingArc.Source);
+                nodeStates[leavingArc.Source].SubTreeTag = tag;
+
+                while (stack.Count > 0)
+                {
+                    count++;
+
+                    int nodeIndex = stack.Pop();
+                    FlowNode node = nodes[nodeIndex];
+                    ref NodeState nodeState = ref nodeStates[nodeIndex];
+
+                    for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
+                    {
+                        int neiArcIndex = nodeArcs[i];
+                        FlowArc neiArc = arcs[neiArcIndex];
+                        ref ArcState neiArcState = ref arcStates[neiArcIndex];
+
+                        if (!neiArcState.IsTree)
+                            continue;
+
+                        int neiNodeIndex = neiArc.Source == nodeIndex ? neiArc.Target : neiArc.Source;
+                        FlowNode neiNode = nodes[neiNodeIndex];
+                        ref NodeState neiState = ref nodeStates[neiNodeIndex];
+
+                        if (neiState.SubTreeTag == tag)
+                            continue;
+
+                        neiState.SubTreeTag = tag;
+                        stack.Push(neiNodeIndex);
+                    }
+                }
+
+                leavingArcState.IsTree = true;
+                return count * 2 <= nodes.Length;
+            }
+
+            /// <summary>
+            /// Updates the current tree by respectively adding and removing the specified arcs.
+            /// This method expects the cycle containing the arcs to be stored in the node states.
+            /// It also expects the sub-tree containing the source node of the leaving arc to be tagged.
+            /// The specified flow is pushed along the cycle before the arcs are added and removed.
+            /// updateSource indicates whether the method should use the source or target sub-tree of the leaving
+            /// arc when updating dual slack variables.
+            /// </summary>
+            private bool UpdateTreeForCycle(int enteringArcIndex, int leavingArcIndex, double flow, bool updateSource)
+            {
+                FlowNode[] nodes = _graph._nodes;
+                int[] nodeArcs = _graph._nodeArcs;
+                FlowArc[] arcs = _graph._arcs;
+                NodeState[] nodeStates = _nodeStates;
+                ArcState[] arcStates = _arcStates;
+                Stack<int> stack = _stack;
+
+                FlowArc enteringArc = arcs[enteringArcIndex];
+                ref ArcState enteringArcState = ref arcStates[enteringArcIndex];
+                FlowArc leavingArc = arcs[leavingArcIndex];
+                ref ArcState leavingArcState = ref arcStates[leavingArcIndex];
+
+                // Update primal flows.
                 int cur = enteringArc.Source;
                 do
                 {
-                    int parArcIndex = _nodeStates[cur].ParentArcOrTag;
-                    FlowArc parArc = _graph._arcs[parArcIndex];
-                    ref ArcState parArcState = ref _arcStates[parArcIndex];
+                    int parArcIndex = nodeStates[cur].ParentCycleIndex;
+                    FlowArc parArc = arcs[parArcIndex];
+                    ref ArcState parArcState = ref arcStates[parArcIndex];
                     double old = parArcState.Value;
                     if (parArc.Source == cur)
                     {
@@ -348,88 +436,67 @@ namespace NetworkSimplex
                         parArcState.Value += flow;
                         cur = parArc.Source;
                     }
-
-                    Console.WriteLine("Updating flow on {0} -> {1} from {2} to {3}", (char)('a' + parArc.Source), (char)('a' + parArc.Target), old, parArcState.Value);
                 } while (cur != enteringArc.Target);
 
-                // Enter pivoting arc and leave the lowest one.
+                // Disconnect the sub trees.
+                leavingArcState.IsTree = false;
+                leavingArcState.Value = 0;
+
+                // Update dual slacks for crossing non-tree edges
+                int tag = ++_tag;
+
+                int subTreeTag = nodeStates[leavingArc.Source].SubTreeTag;
+                // "The dual slacks corresponding to those arcs that bridge in the same direction
+                //  as the entering arc get decremented by the old dual slack on the entering arc,
+                //  whereas those that correspond to arcs bridging in the opposite direction get
+                //  incremented by this amount."
+                // So if we are updating source and entering arc starts in source, we must flip.
+                // Or if we update target and entering arc starts in target.
+                double startInSubTreeIncrease = enteringArcState.Value;
+                if (updateSource == (nodeStates[enteringArc.Source].SubTreeTag == subTreeTag))
+                    startInSubTreeIncrease *= -1;
+
+                stack.Clear();
+                stack.Push(updateSource ? leavingArc.Source : leavingArc.Target);
+                nodeStates[stack.Peek()].Tag = tag;
+
+                while (stack.Count > 0)
+                {
+                    int nodeIndex = stack.Pop();
+                    FlowNode node = nodes[nodeIndex];
+                    ref NodeState nodeState = ref nodeStates[nodeIndex];
+
+                    for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
+                    {
+                        int arcIndex = nodeArcs[i];
+                        FlowArc arc = arcs[arcIndex];
+                        ref ArcState arcState = ref arcStates[arcIndex];
+
+                        int neiNodeIndex = arc.Source == nodeIndex ? arc.Target : arc.Source;
+                        ref NodeState neiState = ref nodeStates[neiNodeIndex];
+
+                        if (!arcState.IsTree)
+                        {
+                            // Update dual slack if this non-tree edge crosses between the sub-trees
+                            if ((nodeState.SubTreeTag == subTreeTag) != (neiState.SubTreeTag == subTreeTag))
+                                arcState.Value += startInSubTreeIncrease * (arc.Source == nodeIndex ? 1 : -1);
+
+                            continue;
+                        }
+
+                        if (neiState.Tag == tag)
+                            continue;
+
+                        neiState.Tag = tag;
+                        stack.Push(neiNodeIndex);
+                    }
+                }
+
+                // Reconnect sub trees with new tree edge.
                 enteringArcState.IsTree = true;
                 enteringArcState.Value = flow;
-                Console.WriteLine("{0} -> {1} is new tree edge with {2} flow", (char)('a' + enteringArc.Source), (char)('a' + enteringArc.Target), flow);
-                _arcStates[leavingArcIndex].IsTree = false;
 
-                // Recompute dual and slack variables
-                AssignDualVariables();
-                AssignDualSlacks();
                 return true;
-            }
-
-            /// <summary>
-            /// Runs DFS to assign dual variables with the 0th variable as the root.
-            /// </summary>
-            private void AssignDualVariables()
-            {
-                _tag--;
-                _nodeStates[0].DualValue = 0;
-                _nodeStates[0].ParentArcOrTag = _tag;
-                AssignDualVariablesVisit(0);
-            }
-
-            private void AssignDualVariablesVisit(int nodeIndex)
-            {
-                FlowNode node = _graph._nodes[nodeIndex];
-                ref NodeState nodeState = ref _nodeStates[nodeIndex];
-
-                for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
-                {
-                    int neiArcIndex = _graph._nodeArcs[i];
-                    FlowArc neiArc = _graph._arcs[neiArcIndex];
-                    ref ArcState neiArcState = ref _arcStates[neiArcIndex];
-
-                    if (!neiArcState.IsTree)
-                        continue;
-
-                    int neiIndex = neiArc.Source == nodeIndex ? neiArc.Target : neiArc.Source;
-                    FlowNode neiNode = _graph._nodes[neiIndex];
-                    ref NodeState neiState = ref _nodeStates[neiIndex];
-
-                    if (neiState.ParentArcOrTag == _tag)
-                        continue;
-
-                    neiState.ParentArcOrTag = _tag;
-
-                    // Dual feasibility condition states, for edge (i, j):
-                    // dualJ - dualI = costIJ
-                    if (neiArc.Source == nodeIndex)
-                        neiState.DualValue = neiArc.Cost + nodeState.DualValue;
-                    else
-                        neiState.DualValue = nodeState.DualValue - neiArc.Cost;
-
-                    Console.WriteLine("{0} gets dual value {1}", (char)('a' + neiIndex), neiState.DualValue);
-                    AssignDualVariablesVisit(neiIndex);
-                }
-            }
-
-            /// <summary>
-            /// Assigns dual slack to all non-tree arcs.
-            /// </summary>
-            private void AssignDualSlacks()
-            {
-                for (int arcId = 0; arcId < _graph._arcs.Length; arcId++)
-                {
-                    FlowArc arc = _graph._arcs[arcId];
-                    ref ArcState arcState = ref _arcStates[arcId];
-                    if (arcState.IsTree)
-                        continue;
-
-                    ref NodeState nodeI = ref _nodeStates[arc.Source];
-                    ref NodeState nodeJ = ref _nodeStates[arc.Target];
-                    // Non-tree edge. Compute slack
-                    // slackIJ = dualI + costIJ - dualJ
-                    arcState.Value = nodeI.DualValue + arc.Cost - nodeJ.DualValue;
-
-                    Console.WriteLine("{0} -> {1} is assigned slack {2}", (char)('a' + arc.Source), (char)('a' + arc.Target), arcState.Value);
-                }
             }
 
             /// <summary>
@@ -437,96 +504,95 @@ namespace NetworkSimplex
             /// </summary>
             private bool DualPivot(int leavingArcIndex)
             {
-                FlowArc leavingArc = _graph._arcs[leavingArcIndex];
-                ref ArcState leavingArcState = ref _arcStates[leavingArcIndex];
+                FlowNode[] nodes = _graph._nodes;
+                int[] nodeArcs = _graph._nodeArcs;
+                FlowArc[] arcs = _graph._arcs;
+                NodeState[] nodeStates = _nodeStates;
+                ArcState[] arcStates = _arcStates;
+                Stack<int> stack = _stack;
 
-                Console.WriteLine("Leaving (dual pivot) {0} -> {1} with flow {2}", (char)('a' + leavingArc.Source), (char)('a' + leavingArc.Target), leavingArcState.Value);
+                FlowArc leavingArc = arcs[leavingArcIndex];
+                ref ArcState leavingArcState = ref arcStates[leavingArcIndex];
 
-                leavingArcState.IsTree = false;
-                // Tag part of tree that still contains root
-                _tag--;
-                stack.Clear();
-                stack.Push(0);
-                _nodeStates[0].ParentArcOrTag = _tag;
-
-                while (stack.Count > 0)
-                {
-                    int nodeIndex = stack.Pop();
-                    FlowNode node = _graph._nodes[nodeIndex];
-                    ref NodeState nodeState = ref _nodeStates[nodeIndex];
-
-                    for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
-                    {
-                        int neiArcIndex = _graph._nodeArcs[i];
-                        FlowArc neiArc = _graph._arcs[neiArcIndex];
-                        ref ArcState neiArcState = ref _arcStates[neiArcIndex];
-                        // Only follow tree edges
-                        if (!_arcStates[neiArcIndex].IsTree)
-                            continue;
-
-                        int neiIndex = neiArc.Source == nodeIndex ? neiArc.Target : neiArc.Source;
-                        FlowNode nei = _graph._nodes[neiIndex];
-                        ref NodeState neiState = ref _nodeStates[neiIndex];
-                        // Do not expand backwards
-                        if (neiState.ParentArcOrTag == _tag)
-                            continue;
-
-                        neiState.ParentArcOrTag = _tag;
-                        stack.Push(neiIndex);
-                    }
-                }
+                bool sourceIsSmallest = TagSubTree(leavingArcIndex);
 
                 // Find entering arc index. It must bridge the subtrees in opposite direction
                 // and have the smallest dual slack.
-                bool leavingStartsInRoot = _nodeStates[leavingArc.Source].ParentArcOrTag == _tag;
+                leavingArcState.IsTree = false;
+                int tag = ++_tag;
+                int subTreeTag = nodeStates[leavingArc.Source].SubTreeTag;
+
+                stack.Clear();
+                stack.Push(sourceIsSmallest ? leavingArc.Source : leavingArc.Target);
+                nodeStates[stack.Peek()].Tag = tag;
 
                 int enteringArcIndex = -1;
                 double minDualSlack = double.MaxValue;
-                for (int i = 0; i < _graph._arcs.Length; i++)
+                while (stack.Count > 0)
                 {
-                    FlowArc arc = _graph._arcs[i];
-                    ref ArcState arcState = ref _arcStates[i];
-                    if (arcState.IsTree)
-                        continue;
+                    int nodeIndex = stack.Pop();
+                    FlowNode node = nodes[nodeIndex];
+                    ref NodeState nodeState = ref nodeStates[nodeIndex];
 
-                    ref NodeState sourceNodeState = ref _nodeStates[arc.Source];
-                    ref NodeState targetNodeState = ref _nodeStates[arc.Target];
-                    bool startsInRoot = _tag == sourceNodeState.ParentArcOrTag;
-                    bool endsInRoot = _tag == targetNodeState.ParentArcOrTag;
-
-                    // If we do not cross between the subtrees, then this is not a feasible entering arc.
-                    if (startsInRoot == endsInRoot)
-                        continue;
-
-                    // Ok, this crosses. Ensure the bridge direction is the opposite of the leaving arc.
-                    if (startsInRoot == leavingStartsInRoot)
-                        continue;
-
-                    // Ok, this bridges in the opposite direction.
-                    if (arcState.Value < minDualSlack)
+                    for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
                     {
-                        minDualSlack = arcState.Value;
-                        enteringArcIndex = i;
+                        int arcIndex = nodeArcs[i];
+                        FlowArc arc = arcs[arcIndex];
+                        ref ArcState arcState = ref arcStates[arcIndex];
+
+                        int neiNodeIndex = arc.Source == nodeIndex ? arc.Target : arc.Source;
+                        ref NodeState neiState = ref nodeStates[neiNodeIndex];
+
+                        if (!arcState.IsTree)
+                        {
+                            // Update entering arc if this non-tree edge crosses between the sub-trees
+                            // in opposite order of leaving arc
+                            bool startsInSmallest = arc.Source == nodeIndex;
+                            if ((nodeState.SubTreeTag == subTreeTag) != (neiState.SubTreeTag == subTreeTag) &&
+                                sourceIsSmallest != startsInSmallest)
+                            {
+                                if (arcState.Value < minDualSlack)
+                                {
+                                    minDualSlack = arcState.Value;
+                                    enteringArcIndex = arcIndex;
+                                }
+                                else if (arcState.Value == minDualSlack)
+                                    enteringArcIndex = Math.Min(enteringArcIndex, arcIndex);
+                            }
+
+                            continue;
+                        }
+
+                        if (neiState.Tag == tag)
+                            continue;
+
+                        neiState.Tag = tag;
+                        stack.Push(neiNodeIndex);
                     }
                 }
+
+                leavingArcState.IsTree = true;
 
                 if (enteringArcIndex == -1)
                     return false;
 
-                leavingArcState.IsTree = true;
                 FindCycleOnArcAddition(enteringArcIndex);
-                UpdateTreeForCycle(enteringArcIndex, leavingArcIndex, -leavingArcState.Value);
+                UpdateTreeForCycle(enteringArcIndex, leavingArcIndex, -leavingArcState.Value, sourceIsSmallest);
                 return true;
             }
 
+            [StructLayout(LayoutKind.Auto)]
             private struct NodeState
             {
                 public bool InTree { get; set; }
                 public double Supply { get; set; }
                 public double DualValue { get; set; }
-                public int ParentArcOrTag { get; set; }
+                public int Tag { get; set; }
+                public int SubTreeTag { get; set; }
+                public int ParentCycleIndex { get; set; }
             }
 
+            [StructLayout(LayoutKind.Auto)]
             private struct ArcState
             {
                 public bool IsTree { get; set; }
