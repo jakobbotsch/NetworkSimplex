@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 
@@ -108,11 +109,12 @@ namespace NetworkSimplex
 
         private class FlowGraphSolver
         {
+            private int _rootNode = 'g' - 'a';
             private readonly FlowGraph _graph;
             private readonly NodeState[] _nodeStates;
             private readonly ArcState[] _arcStates;
             private readonly Stack<int> _stack = new Stack<int>();
-            private readonly Queue<int> _queue = new Queue<int>();
+            private readonly List<int> _cycle = new List<int>();
             private int _tag;
 
             public FlowGraphSolver(FlowGraph graph)
@@ -153,9 +155,9 @@ namespace NetworkSimplex
                 int tag = ++_tag;
 
                 int seen = 1;
-                stack.Push((0, 0));
-
-                nodeStates[0].Tag = tag;
+                stack.Push((_rootNode, 0));
+                nodeStates[_rootNode].Tag = tag;
+                nodeStates[_rootNode].ParentArcIndex = -1;
 
                 while (stack.Count > 0)
                 {
@@ -208,6 +210,7 @@ namespace NetworkSimplex
 
                         seen++;
                         neiState.Tag = tag;
+                        neiState.ParentArcIndex = arcIndex;
                         arcState.IsTree = true;
 
                         // Dual feasibility condition states, for edge (i, j):
@@ -273,103 +276,102 @@ namespace NetworkSimplex
                 FlowArc enteringArc = arcs[enteringArcIndex];
                 ref ArcState enteringArcState = ref arcStates[enteringArcIndex];
 
-                FindCycleOnArcAddition(enteringArcIndex);
-                // Find smallest flow in cycle that runs in the opposite direction of entering arc.
-                // This could be done directly in the loop above as CPU/memory trade-off.
-                double flow = double.MaxValue;
+                FindCycle(enteringArcIndex);
+
                 int leavingArcIndex = -1;
-                int cur = enteringArc.Source;
-                do
+                double flow = double.MaxValue;
+
+                int prev = enteringArc.Target;
+                foreach (int arcIndex in _cycle)
                 {
-                    int parArcIndex = nodeStates[cur].ParentCycleIndex;
-                    FlowArc parArc = arcs[parArcIndex];
-                    ref ArcState parArcState = ref arcStates[parArcIndex];
-                    if (parArc.Source == cur)
+                    FlowArc arc = arcs[arcIndex];
+                    if (arc.Source == prev)
                     {
-                        // This is the opposite direction of entering arc.
-                        if (parArcState.Value < flow)
-                        {
-                            flow = parArcState.Value;
-                            leavingArcIndex = parArcIndex;
-                        }
-                        else if (parArcState.Value == flow)
-                            leavingArcIndex = Math.Min(parArcIndex, leavingArcIndex); // Bland's rule
-
-                        cur = parArc.Target;
+                        prev = arc.Target;
+                        continue; // Same direction as prev.
                     }
-                    else
-                        cur = parArc.Source;
 
-                } while (cur != enteringArc.Target);
+                    prev = arc.Source;
+                    ref ArcState arcState = ref arcStates[arcIndex];
+                    if (arcState.Value < flow)
+                    {
+                        flow = arcState.Value;
+                        leavingArcIndex = arcIndex;
+                    }
+                    else if (arcState.Value == flow)
+                        leavingArcIndex = Math.Min(leavingArcIndex, arcIndex);
+                }
 
                 if (leavingArcIndex == -1)
                     return false;
 
-                bool updateSource = TagSubTree(leavingArcIndex);
-
-                UpdateTreeForCycle(enteringArcIndex, leavingArcIndex, flow, updateSource);
+                bool sourceIsSmallest = TagSubTree(leavingArcIndex);
+                UpdateTreeForCycle(enteringArcIndex, leavingArcIndex, flow, sourceIsSmallest);
                 return true;
             }
 
             /// <summary>
-            /// Finds the cycle that would result when adding the specified arc to the current tree.
-            /// The cycle is stored in the node states through parent arc indices.
+            /// Finds the cycle that would result when adding the specified arc to the tree.
+            /// The cycle is stored in _cycle in the same direction as the specified arc.
+            /// The first arc starts at the target of the entering arc.
             /// </summary>
-            private void FindCycleOnArcAddition(int arcIndex)
+            private void FindCycle(int enteringArcIndex)
             {
-                FlowNode[] nodes = _graph._nodes;
-                int[] nodeArcs = _graph._nodeArcs;
-                FlowArc[] arcs = _graph._arcs;
                 NodeState[] nodeStates = _nodeStates;
+                FlowArc[] arcs = _graph._arcs;
                 ArcState[] arcStates = _arcStates;
-                Queue<int> queue = _queue;
+                List<int> cycle = _cycle;
 
-                FlowArc enteringArc = arcs[arcIndex];
-                ref ArcState enteringArcState = ref arcStates[arcIndex];
-
+                cycle.Clear();
                 int tag = ++_tag;
-                // BFS is best in practice.
-                queue.Clear();
-                queue.Enqueue(enteringArc.Target);
-                nodeStates[enteringArc.Target].ParentCycleIndex = arcIndex;
-                nodeStates[enteringArc.Target].Tag = tag;
 
-                // Find cycle when arcIndex enters.
+                FlowArc enteringArc = arcs[enteringArcIndex];
+                // Tag from source up to root node.
+                int cur = enteringArc.Source;
                 while (true)
                 {
-                    int nodeIndex = queue.Dequeue();
-                    FlowNode node = nodes[nodeIndex];
-                    ref NodeState nodeState = ref nodeStates[nodeIndex];
-
-                    for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
-                    {
-                        int neiArcIndex = nodeArcs[i];
-                        // Only follow tree edges
-                        if (!arcStates[neiArcIndex].IsTree)
-                            continue;
-
-                        FlowArc neiArc = arcs[neiArcIndex];
-                        int neiNodeIndex = neiArc.Source == nodeIndex ? neiArc.Target : neiArc.Source;
-                        ref NodeState neiNodeState = ref nodeStates[neiNodeIndex];
-                        if (neiNodeState.Tag == tag)
-                            continue;
-
-                        neiNodeState.ParentCycleIndex = neiArcIndex;
-                        // When we find the source of the arc we are pivoting on we have found the full cycle.
-                        // Get out of the loop ASAP.
-                        if (neiNodeIndex == enteringArc.Source)
-                            return;
-
-                        neiNodeState.Tag = tag;
-                        queue.Enqueue(neiNodeIndex);
-                    }
+                    ref NodeState nodeState = ref nodeStates[cur];
+                    nodeState.Tag = tag;
+                    int parArcIndex = nodeStates[cur].ParentArcIndex;
+                    if (parArcIndex == -1)
+                        break;
+                    FlowArc parArc = arcs[parArcIndex];
+                    cur = parArc.Source == cur ? parArc.Target : parArc.Source;
                 }
+
+                // Walk from target until we get to a tagged node. This is the common ancestor,
+                // so this divides the cycle.
+                cur = enteringArc.Target;
+                while (true)
+                {
+                    ref NodeState nodeState = ref nodeStates[cur];
+                    if (nodeState.Tag == tag)
+                        break;
+
+                    int parArcIndex = nodeStates[cur].ParentArcIndex;
+                    cycle.Add(parArcIndex);
+                    FlowArc parArc = arcs[parArcIndex];
+                    cur = parArc.Source == cur ? parArc.Target : parArc.Source;
+                }
+
+                int meetUp = cur;
+                int reverseIndex = cycle.Count;
+                // Now walk up from source until we get to the meetup point.
+                cur = enteringArc.Source;
+                while (cur != meetUp)
+                {
+                    int parArcIndex = nodeStates[cur].ParentArcIndex;
+                    cycle.Add(parArcIndex);
+                    FlowArc parArc = arcs[parArcIndex];
+                    cur = parArc.Source == cur ? parArc.Target : parArc.Source;
+                }
+
+                cycle.Reverse(reverseIndex, cycle.Count - reverseIndex);
             }
 
             /// <summary>
-            /// Simulates removing the specified arc and then tags the sub-tree containing
-            /// the source node. Returns true if the smallest sub-tree is the one containing
-            /// the source node.
+            /// Simulates removing the specified arc and then tags the sub-tree containing the source node.
+            /// Returns true if the sub-tree containing the source is the smallest one.
             /// </summary>
             private bool TagSubTree(int leavingArcIndex)
             {
@@ -398,19 +400,17 @@ namespace NetworkSimplex
 
                     int nodeIndex = stack.Pop();
                     FlowNode node = nodes[nodeIndex];
-                    ref NodeState nodeState = ref nodeStates[nodeIndex];
 
                     for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
                     {
                         int neiArcIndex = nodeArcs[i];
-                        FlowArc neiArc = arcs[neiArcIndex];
                         ref ArcState neiArcState = ref arcStates[neiArcIndex];
 
                         if (!neiArcState.IsTree)
                             continue;
 
+                        FlowArc neiArc = arcs[neiArcIndex];
                         int neiNodeIndex = neiArc.Source == nodeIndex ? neiArc.Target : neiArc.Source;
-                        FlowNode neiNode = nodes[neiNodeIndex];
                         ref NodeState neiState = ref nodeStates[neiNodeIndex];
 
                         if (neiState.SubTreeTag == tag)
@@ -427,13 +427,13 @@ namespace NetworkSimplex
 
             /// <summary>
             /// Updates the current tree by respectively adding and removing the specified arcs.
-            /// This method expects the cycle containing the arcs to be stored in the node states.
-            /// It also expects the sub-tree containing the source node of the leaving arc to be tagged.
+            /// This method expects the cycle containing the entering arc to be stored in _cycle.
+            /// It also expects the leaving node source sub-tree to be tagged.
             /// The specified flow is pushed along the cycle before the arcs are added and removed.
-            /// updateSource indicates whether the method should use the source or target sub-tree of the leaving
-            /// arc when updating dual slack variables.
+            /// This method also updates parent indices for correctness. This is done by running DFS
+            /// in the non-root sub-tree starting at the entering arc node on this side.
             /// </summary>
-            private bool UpdateTreeForCycle(int enteringArcIndex, int leavingArcIndex, double flow, bool updateSource)
+            private bool UpdateTreeForCycle(int enteringArcIndex, int leavingArcIndex, double flow, bool sourceIsSmallest)
             {
                 FlowNode[] nodes = _graph._nodes;
                 int[] nodeArcs = _graph._nodeArcs;
@@ -441,6 +441,7 @@ namespace NetworkSimplex
                 NodeState[] nodeStates = _nodeStates;
                 ArcState[] arcStates = _arcStates;
                 Stack<int> stack = _stack;
+                List<int> cycle = _cycle;
 
                 FlowArc enteringArc = arcs[enteringArcIndex];
                 ref ArcState enteringArcState = ref arcStates[enteringArcIndex];
@@ -448,24 +449,22 @@ namespace NetworkSimplex
                 ref ArcState leavingArcState = ref arcStates[leavingArcIndex];
 
                 // Update primal flows.
-                int cur = enteringArc.Source;
-                do
+                int prev = enteringArc.Target;
+                foreach (int arcIndex in _cycle)
                 {
-                    int parArcIndex = nodeStates[cur].ParentCycleIndex;
-                    FlowArc parArc = arcs[parArcIndex];
-                    ref ArcState parArcState = ref arcStates[parArcIndex];
-                    double old = parArcState.Value;
-                    if (parArc.Source == cur)
+                    FlowArc arc = arcs[arcIndex];
+                    ref ArcState arcState = ref arcStates[arcIndex];
+                    if (arc.Source == prev)
                     {
-                        parArcState.Value -= flow;
-                        cur = parArc.Target;
+                        prev = arc.Target;
+                        arcState.Value += flow;
                     }
                     else
                     {
-                        parArcState.Value += flow;
-                        cur = parArc.Source;
+                        prev = arc.Source;
+                        arcState.Value -= flow;
                     }
-                } while (cur != enteringArc.Target);
+                }
 
                 // Disconnect the sub trees.
                 leavingArcState.IsTree = false;
@@ -475,19 +474,44 @@ namespace NetworkSimplex
                 int tag = ++_tag;
 
                 int subTreeTag = nodeStates[leavingArc.Source].SubTreeTag;
-                // "The dual slacks corresponding to those arcs that bridge in the same direction
-                //  as the entering arc get decremented by the old dual slack on the entering arc,
-                //  whereas those that correspond to arcs bridging in the opposite direction get
-                //  incremented by this amount."
-                // So if we are updating source and entering arc starts in source, we must flip.
-                // Or if we update target and entering arc starts in target.
-                double startInSubTreeIncrease = enteringArcState.Value;
-                if (updateSource == (nodeStates[enteringArc.Source].SubTreeTag == subTreeTag))
-                    startInSubTreeIncrease *= -1;
+                if (sourceIsSmallest && nodeStates[_rootNode].SubTreeTag == subTreeTag)
+                {
+                    // Root is inside smallest sub-tree. Any node in larger sub-tree will have
+                    // leaving arc nodes as ancestor, so use leaving arc node in larger sub-tree
+                    // as new root.
+                    _rootNode = leavingArc.Target;
+                }
+                else if (!sourceIsSmallest && nodeStates[_rootNode].SubTreeTag != subTreeTag)
+                {
+                    // Same as above, but the leaving arc node in larger sub-tree is the source.
+                    _rootNode = leavingArc.Source;
+                }
+
+                // In other cases the root is inside the largest sub tree, so it does not need to change.
+                // In all cases we need to link all nodes in the smaller sub tree up to the entering arc.
+                int startNodeIndex;
+                double startInSubTreeIncrease;
+                if (sourceIsSmallest == (nodeStates[enteringArc.Source].SubTreeTag == subTreeTag))
+                {
+                    // Source node of entering arc is in smallest sub-tree.
+                    // "The dual slacks corresponding to those arcs that bridge in the same direction
+                    //  as the entering arc get decremented by the old dual slack on the entering arc,
+                    //  whereas those that correspond to arcs bridging in the opposite direction get
+                    //  incremented by this amount."
+                    startNodeIndex = enteringArc.Source;
+                    startInSubTreeIncrease = -enteringArcState.Value;
+                }
+                else
+                {
+                    startNodeIndex = enteringArc.Target;
+                    startInSubTreeIncrease = enteringArcState.Value;
+                }
 
                 stack.Clear();
-                stack.Push(updateSource ? leavingArc.Source : leavingArc.Target);
-                nodeStates[stack.Peek()].Tag = tag;
+                stack.Push(startNodeIndex);
+                nodeStates[startNodeIndex].Tag = tag;
+                nodeStates[startNodeIndex].ParentArcIndex = enteringArcIndex;
+                nodeStates[_rootNode].ParentArcIndex = -1;
 
                 while (stack.Count > 0)
                 {
@@ -517,6 +541,7 @@ namespace NetworkSimplex
                             continue;
 
                         neiState.Tag = tag;
+                        neiState.ParentArcIndex = arcIndex;
                         stack.Push(neiNodeIndex);
                     }
                 }
@@ -545,11 +570,11 @@ namespace NetworkSimplex
 
                 bool sourceIsSmallest = TagSubTree(leavingArcIndex);
 
+                int subTreeTag = nodeStates[leavingArc.Source].SubTreeTag;
                 // Find entering arc index. It must bridge the subtrees in opposite direction
                 // and have the smallest dual slack.
                 leavingArcState.IsTree = false;
                 int tag = ++_tag;
-                int subTreeTag = nodeStates[leavingArc.Source].SubTreeTag;
 
                 stack.Clear();
                 stack.Push(sourceIsSmallest ? leavingArc.Source : leavingArc.Target);
@@ -575,10 +600,11 @@ namespace NetworkSimplex
                         if (!arcState.IsTree)
                         {
                             // Update entering arc if this non-tree edge crosses between the sub-trees
-                            // in opposite order of leaving arc
-                            bool startsInSmallest = arc.Source == nodeIndex;
-                            if ((nodeState.SubTreeTag == subTreeTag) != (neiState.SubTreeTag == subTreeTag) &&
-                                sourceIsSmallest != startsInSmallest)
+                            // in opposite order of leaving arc.
+                            // The leaving arc always starts in the source, so these arcs should end in the source
+                            bool startsInSource = nodeStates[arc.Source].SubTreeTag == subTreeTag;
+                            bool endsInSource = nodeStates[arc.Target].SubTreeTag == subTreeTag;
+                            if (endsInSource && startsInSource != endsInSource)
                             {
                                 if (arcState.Value < minDualSlack)
                                 {
@@ -605,7 +631,7 @@ namespace NetworkSimplex
                 if (enteringArcIndex == -1)
                     return false;
 
-                FindCycleOnArcAddition(enteringArcIndex);
+                FindCycle(enteringArcIndex);
                 UpdateTreeForCycle(enteringArcIndex, leavingArcIndex, -leavingArcState.Value, sourceIsSmallest);
                 return true;
             }
@@ -617,7 +643,7 @@ namespace NetworkSimplex
                 public double DualValue { get; set; }
                 public int Tag { get; set; }
                 public int SubTreeTag { get; set; }
-                public int ParentCycleIndex { get; set; }
+                public int ParentArcIndex { get; set; }
             }
 
             [StructLayout(LayoutKind.Auto)]
