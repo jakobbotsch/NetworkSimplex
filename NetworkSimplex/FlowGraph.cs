@@ -114,7 +114,6 @@ namespace NetworkSimplex
             private readonly Stack<int> _stack = new Stack<int>();
             private readonly Queue<int> _queue = new Queue<int>();
             private int _tag;
-            private int _seen;
 
             public FlowGraphSolver(FlowGraph graph)
             {
@@ -125,12 +124,9 @@ namespace NetworkSimplex
 
             public FlowGraphSolution Solve()
             {
-                _nodeStates[0].InTree = true;
-                // Compute initial spanning tree, primal variables, dual variables and dual slack variables.
-                // Always use first node as root.
-                InitialVisit(0);
+                int seen = ComputeInitialValues();
 
-                if (_seen != _graph._nodes.Length)
+                if (seen != _graph._nodes.Length)
                     throw new InvalidOperationException("Flow graph is not connected");
 
                 while (true)
@@ -145,61 +141,94 @@ namespace NetworkSimplex
             /// Runs DFS to find an initial spanning tree while simultaneously assigning
             /// primal variables, dual variables and dual slack variables.
             /// </summary>
-            private void InitialVisit(int root)
+            private int ComputeInitialValues()
             {
                 FlowNode[] nodes = _graph._nodes;
                 int[] nodeArcs = _graph._nodeArcs;
                 FlowArc[] arcs = _graph._arcs;
                 NodeState[] nodeStates = _nodeStates;
                 ArcState[] arcStates = _arcStates;
+                Stack<(int nodeIndex, int nodeArcIndex)> stack = new Stack<(int nodeIndex, int nodeArcIndex)>();
 
-                FlowNode node = nodes[root];
-                ref NodeState nodeState = ref nodeStates[root];
-                nodeState.Supply = node.Supply;
-                _seen++;
+                int tag = ++_tag;
 
-                for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
+                int seen = 1;
+                stack.Push((0, 0));
+
+                nodeStates[0].Tag = tag;
+
+                while (stack.Count > 0)
                 {
-                    int arcIndex = nodeArcs[i];
-                    FlowArc arc = arcs[arcIndex];
-                    ref ArcState arcState = ref arcStates[arcIndex];
+                    var (nodeIndex, nodeArcIndex) = stack.Peek();
+                    FlowNode node = nodes[nodeIndex];
+                    ref NodeState nodeState = ref nodeStates[nodeIndex];
 
-                    int nei = arc.Source == root ? arc.Target : arc.Source;
-                    ref NodeState neiState = ref nodeStates[nei];
-                    if (neiState.InTree)
+                    if (nodeArcIndex == 0)
                     {
-                        // Non-tree edge. Compute slack
-                        // slackIJ = dualI + costIJ - dualJ
-                        if (arc.Source == root)
-                            arcState.Value = nodeState.DualValue + arc.Cost - neiState.DualValue;
-                        else
-                            arcState.Value = neiState.DualValue + arc.Cost - nodeState.DualValue;
+                        nodeState.Supply = node.Supply;
+                    }
+                    else
+                    {
+                        // Done with previous child. Update values for it.
+                        int arcIndex = nodeArcs[node.ArcsIndex + nodeArcIndex - 1];
+                        FlowArc arc = arcs[arcIndex];
+                        ref ArcState arcState = ref arcStates[arcIndex];
 
-                        continue;
+                        // If outgoing then we must send negative amount of flow to make sum 0
+                        // If incoming then we can just send flow along the edge to make it 0
+                        double supply;
+                        if (arc.Source == nodeIndex)
+                            arcState.Value = -(supply = nodeStates[arc.Target].Supply);
+                        else
+                            arcState.Value = supply = nodeStates[arc.Source].Supply;
+
+                        // In any case we move the supply from neighbor to root
+                        nodeState.Supply += supply;
                     }
 
-                    neiState.InTree = true;
-                    arcState.IsTree = true;
+                    for (; nodeArcIndex < node.CountIn + node.CountOut; nodeArcIndex++)
+                    {
+                        int arcIndex = nodeArcs[node.ArcsIndex + nodeArcIndex];
+                        FlowArc arc = arcs[arcIndex];
+                        ref ArcState arcState = ref arcStates[arcIndex];
 
-                    // Dual feasibility condition states, for edge (i, j):
-                    // dualJ - dualI = costIJ
-                    if (arc.Source == root)
-                        neiState.DualValue = arc.Cost + nodeState.DualValue;
-                    else
-                        neiState.DualValue = nodeState.DualValue - arc.Cost;
+                        int neiIndex = arc.Source == nodeIndex ? arc.Target : arc.Source;
+                        ref NodeState neiState = ref nodeStates[neiIndex];
+                        if (neiState.Tag == tag)
+                        {
+                            // Non-tree edge. Compute slack.
+                            // SlackIJ = dualI + costIJ - dualJ
+                            if (arc.Source == nodeIndex)
+                                arcState.Value = nodeState.DualValue + arc.Cost - neiState.DualValue;
+                            else
+                                arcState.Value = neiState.DualValue + arc.Cost - nodeState.DualValue;
 
-                    InitialVisit(nei);
+                            continue;
+                        }
 
-                    // If outgoing then we must send negative amount of flow to make sum 0
-                    // If incoming then we can just send flow along the edge to make it 0
-                    if (arc.Source == root)
-                        arcState.Value = -neiState.Supply;
-                    else
-                        arcState.Value = neiState.Supply;
+                        seen++;
+                        neiState.Tag = tag;
+                        arcState.IsTree = true;
 
-                    // In any case we move the supply from neighbor to root
-                    nodeState.Supply += neiState.Supply;
+                        // Dual feasibility condition states, for edge (i, j):
+                        // dualJ - dualI = costIJ
+                        if (arc.Source == nodeIndex)
+                            neiState.DualValue = arc.Cost + nodeState.DualValue;
+                        else
+                            neiState.DualValue = nodeState.DualValue - arc.Cost;
+
+                        // Resume from next when we get back to this node
+                        stack.Pop();
+                        stack.Push((nodeIndex, nodeArcIndex + 1));
+                        stack.Push((neiIndex, 0));
+                        break;
+                    }
+
+                    if (nodeArcIndex == node.CountIn + node.CountOut)
+                        stack.Pop();
                 }
+
+                return seen;
             }
 
             private FlowGraphSolution PivotStep()
@@ -584,7 +613,6 @@ namespace NetworkSimplex
             [StructLayout(LayoutKind.Auto)]
             private struct NodeState
             {
-                public bool InTree { get; set; }
                 public double Supply { get; set; }
                 public double DualValue { get; set; }
                 public int Tag { get; set; }
