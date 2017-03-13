@@ -141,57 +141,15 @@ f -> g 24
                 Stopwatch timer = Stopwatch.StartNew();
                 FlowGraphSolution solution = graph.Solve();
                 TimeSpan netSimpElapsed = timer.Elapsed;
-
-                LpSolve lp = LpSolve.make_lp(graph.Nodes.Count, graph.Arcs.Count);
-                lp.set_debug(false);
-                lp.set_verbose(0);
-                for (int i = 0; i < graph.Arcs.Count; i++)
-                    Trace.Assert(lp.set_col_name(i, $"a_{graph.Arcs[i].Source}_{graph.Arcs[i].Target}"));
-
-                Trace.Assert(lp.set_add_rowmode(true));
-                foreach (FlowNode node in graph.Nodes)
-                {
-                    List<int> cols = new List<int>();
-                    List<double> coeffs = new List<double>();
-
-                    foreach (int outgoing in graph.GetOutgoingArcs(node))
-                    {
-                        cols.Add(outgoing + 1);
-                        coeffs.Add(1);
-                    }
-
-                    foreach (int incoming in graph.GetIncomingArcs(node))
-                    {
-                        cols.Add(incoming + 1);
-                        coeffs.Add(-1);
-                    }
-
-                    Trace.Assert(
-                        lp.add_constraintex(
-                            cols.Count,
-                            coeffs.ToArray(),
-                            cols.ToArray(),
-                            lpsolve_constr_types.EQ,
-                            node.Supply));
-                }
-                lp.set_add_rowmode(false);
-
-                Trace.Assert(
-                    lp.set_obj_fnex(
-                        graph.Arcs.Count,
-                        graph.Arcs.Select(a => a.Cost).ToArray(),
-                        Enumerable.Range(1, graph.Arcs.Count).ToArray()));
-
-                lp.set_minim();
-                timer = Stopwatch.StartNew();
-                lpsolve_return ret = lp.solve();
-                TimeSpan lpElapsed = timer.Elapsed;
+                double cost = solution.Flows.Select((f, i) => f * graph.Arcs[i].Cost).Sum();
+                //(SolutionType lpType, double lpCost, int lpIter, TimeSpan lpElapsed) = SolveLPSolve(graph);
+                (SolutionType lpType, double lpCost, int lpIter, TimeSpan lpElapsed) = (solution.Type, cost, 0, TimeSpan.Zero);
 
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine("Solved {0}", graph, netSimpElapsed.TotalSeconds);
                 Console.ForegroundColor = ConsoleColor.Cyan;
                 Console.WriteLine("{0,-16} {1,6:F2}s, {2,6} iters", "Network Simplex:", netSimpElapsed.TotalSeconds, solution.NumIterations);
-                Console.WriteLine("{0,-16} {1,6:F2}s, {2,6} iters", "LPSolve:", lpElapsed.TotalSeconds, lp.get_total_iter());
+                Console.WriteLine("{0,-16} {1,6:F2}s, {2,6} iters", "LPSolve:", lpElapsed.TotalSeconds, lpIter);
                 Console.ForegroundColor = ConsoleColor.Yellow;
 
                 switch (solution.Type)
@@ -208,24 +166,81 @@ f -> g 24
                             Trace.Assert(Math.Abs(supplyLeft) < 0.0000001);
                         }
 
-                        double cost = solution.Flows.Select((f, i) => f * graph.Arcs[i].Cost).Sum();
-                        double lpCost = lp.get_objective();
-                        Trace.Assert(ret == lpsolve_return.OPTIMAL && Math.Abs(cost - lpCost) < 0.001);
-
+                        Trace.Assert(lpType == SolutionType.Feasible && Math.Abs(cost - lpCost) < 0.001);
                         Console.WriteLine("Optimal solution has {0:F1} cost", cost);
                         break;
                     case SolutionType.Infeasible:
-                        Trace.Assert(ret == lpsolve_return.INFEASIBLE || ret == lpsolve_return.UNBOUNDED);
+                        Trace.Assert(lpType == SolutionType.Infeasible || lpType == SolutionType.Unbounded);
                         Console.WriteLine("Network is infeasible");
                         break;
                     case SolutionType.Unbounded:
-                        Trace.Assert(ret == lpsolve_return.UNBOUNDED || ret == lpsolve_return.INFEASIBLE);
+                        Trace.Assert(lpType == SolutionType.Infeasible || lpType == SolutionType.Unbounded);
                         Console.WriteLine("Network is unbounded");
                         break;
                 }
 
                 Console.WriteLine();
                 Console.ResetColor();
+            }
+        }
+
+        private static (SolutionType type, double cost, int iter, TimeSpan elapsed) SolveLPSolve(FlowGraph graph)
+        {
+            LpSolve lp = LpSolve.make_lp(graph.Nodes.Count, graph.Arcs.Count);
+            lp.set_debug(false);
+            lp.set_verbose(0);
+            for (int i = 0; i < graph.Arcs.Count; i++)
+                Trace.Assert(lp.set_col_name(i, $"a_{graph.Arcs[i].Source}_{graph.Arcs[i].Target}"));
+
+            Trace.Assert(lp.set_add_rowmode(true));
+            foreach (FlowNode node in graph.Nodes)
+            {
+                List<int> cols = new List<int>();
+                List<double> coeffs = new List<double>();
+
+                foreach (int outgoing in graph.GetOutgoingArcs(node))
+                {
+                    cols.Add(outgoing + 1);
+                    coeffs.Add(1);
+                }
+
+                foreach (int incoming in graph.GetIncomingArcs(node))
+                {
+                    cols.Add(incoming + 1);
+                    coeffs.Add(-1);
+                }
+
+                Trace.Assert(
+                    lp.add_constraintex(
+                        cols.Count,
+                        coeffs.ToArray(),
+                        cols.ToArray(),
+                        lpsolve_constr_types.EQ,
+                        node.Supply));
+            }
+            lp.set_add_rowmode(false);
+
+            Trace.Assert(
+                lp.set_obj_fnex(
+                    graph.Arcs.Count,
+                    graph.Arcs.Select(a => a.Cost).ToArray(),
+                    Enumerable.Range(1, graph.Arcs.Count).ToArray()));
+
+            lp.set_minim();
+            Stopwatch timer = Stopwatch.StartNew();
+            lpsolve_return ret = lp.solve();
+            TimeSpan lpElapsed = timer.Elapsed;
+
+            switch (ret)
+            {
+                case lpsolve_return.OPTIMAL:
+                    return (SolutionType.Feasible, lp.get_objective(), (int)lp.get_total_iter(), lpElapsed);
+                case lpsolve_return.INFEASIBLE:
+                    return (SolutionType.Infeasible, 0, (int)lp.get_total_iter(), lpElapsed);
+                case lpsolve_return.UNBOUNDED:
+                    return (SolutionType.Unbounded, 0, (int)lp.get_total_iter(), lpElapsed);
+                default:
+                    throw new Exception();
             }
         }
 
