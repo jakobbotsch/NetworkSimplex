@@ -108,7 +108,7 @@ f -> g 24
             Random rand = new Random(seed);
             while (true)
             {
-                int numNodes = rand.Next(4, 10000);
+                int numNodes = rand.Next(1000, 5000);
                 FlowGraphBuilder builder = new FlowGraphBuilder();
                 for (int i = 0; i < numNodes; i++)
                     builder.AddNode();
@@ -221,8 +221,8 @@ f -> g 24
                         break;
                 }
 
-                Console.WriteLine("Solved {0} in {1:F2}s network simplex, {2:F2}s as general LP problem. Solution is {3}.",
-                    graph, netSimpElapsed.TotalSeconds, lpElapsed.TotalSeconds, solution.Type);
+                Console.WriteLine("Solved {0} in {1:F2}s ({2} iters) network simplex, {3:F2}s as general LP problem. Solution is {4}.",
+                    graph, netSimpElapsed.TotalSeconds, solution.NumIterations, lpElapsed.TotalSeconds, solution.Type);
 
                 if (tested % 100 == 0)
                     Console.WriteLine("Tested: {0}. Feasible: {1}. Infeasible: {2}. Unbounded: {3}", tested, feasible, infeasible, unbounded);

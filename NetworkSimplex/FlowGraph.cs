@@ -100,7 +100,7 @@ namespace NetworkSimplex
         public FlowGraphSolution Solve()
         {
             if (_nodes.Length <= 0)
-                return new FlowGraphSolution(SolutionType.Feasible, Array.Empty<double>());
+                return new FlowGraphSolution(SolutionType.Feasible, Array.Empty<double>(), 0);
 
             return new FlowGraphSolver(this).Solve();
         }
@@ -131,9 +131,9 @@ namespace NetworkSimplex
                 if (seen != _graph._nodes.Length)
                     throw new InvalidOperationException("Flow graph is not connected");
 
-                while (true)
+                for (int iters = 1; ; iters++)
                 {
-                    FlowGraphSolution result = PivotStep();
+                    FlowGraphSolution result = PivotStep(iters);
                     if (result != null)
                         return result;
                 }
@@ -243,7 +243,7 @@ namespace NetworkSimplex
                 return seen;
             }
 
-            private FlowGraphSolution PivotStep()
+            private FlowGraphSolution PivotStep(int iter)
             {
                 FlowArc[] arcs = _graph._arcs;
                 ArcState[] arcStates = _arcStates;
@@ -254,7 +254,7 @@ namespace NetworkSimplex
                         continue;
 
                     if (!PrimalPivot(i))
-                        return new FlowGraphSolution(SolutionType.Unbounded, Array.Empty<double>());
+                        return new FlowGraphSolution(SolutionType.Unbounded, Array.Empty<double>(), iter);
 
                     return null;
                 }
@@ -265,12 +265,12 @@ namespace NetworkSimplex
                         continue;
 
                     if (!DualPivot(i))
-                        return new FlowGraphSolution(SolutionType.Infeasible, Array.Empty<double>());
+                        return new FlowGraphSolution(SolutionType.Infeasible, Array.Empty<double>(), iter);
 
                     return null;
                 }
 
-                return new FlowGraphSolution(SolutionType.Feasible, arcStates.Select(a => a.IsTree ? a.Value : 0).ToArray());
+                return new FlowGraphSolution(SolutionType.Feasible, arcStates.Select(a => a.IsTree ? a.Value : 0).ToArray(), iter);
             }
 
             /// <summary>
