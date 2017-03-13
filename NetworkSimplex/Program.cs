@@ -99,11 +99,7 @@ f -> g 24
         {
             LpSolve.Init();
 
-            int tested = 0;
-            int feasible = 0;
-            int unbounded = 0;
-            int infeasible = 0;
-            int seed = Environment.TickCount;
+            int seed = 1338;
             Console.WriteLine("Seed: {0}", seed);
             Random rand = new Random(seed);
             while (true)
@@ -191,7 +187,13 @@ f -> g 24
                 lpsolve_return ret = lp.solve();
                 TimeSpan lpElapsed = timer.Elapsed;
 
-                tested++;
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("Solved {0}", graph, netSimpElapsed.TotalSeconds);
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine("{0,-16} {1,6:F2}s, {2,6} iters", "Network Simplex:", netSimpElapsed.TotalSeconds, solution.NumIterations);
+                Console.WriteLine("{0,-16} {1,6:F2}s, {2,6} iters", "LPSolve:", lpElapsed.TotalSeconds, lp.get_total_iter());
+                Console.ForegroundColor = ConsoleColor.Yellow;
+
                 switch (solution.Type)
                 {
                     case SolutionType.Feasible:
@@ -209,23 +211,21 @@ f -> g 24
                         double cost = solution.Flows.Select((f, i) => f * graph.Arcs[i].Cost).Sum();
                         double lpCost = lp.get_objective();
                         Trace.Assert(ret == lpsolve_return.OPTIMAL && Math.Abs(cost - lpCost) < 0.001);
-                        feasible++;
+
+                        Console.WriteLine("Optimal solution has {0:F1} cost", cost);
                         break;
                     case SolutionType.Infeasible:
                         Trace.Assert(ret == lpsolve_return.INFEASIBLE || ret == lpsolve_return.UNBOUNDED);
-                        infeasible++;
+                        Console.WriteLine("Network is infeasible");
                         break;
                     case SolutionType.Unbounded:
                         Trace.Assert(ret == lpsolve_return.UNBOUNDED || ret == lpsolve_return.INFEASIBLE);
-                        unbounded++;
+                        Console.WriteLine("Network is unbounded");
                         break;
                 }
 
-                Console.WriteLine("Solved {0} in {1:F2}s ({2} iters) network simplex, {3:F2}s as general LP problem. Solution is {4}.",
-                    graph, netSimpElapsed.TotalSeconds, solution.NumIterations, lpElapsed.TotalSeconds, solution.Type);
-
-                if (tested % 100 == 0)
-                    Console.WriteLine("Tested: {0}. Feasible: {1}. Infeasible: {2}. Unbounded: {3}", tested, feasible, infeasible, unbounded);
+                Console.WriteLine();
+                Console.ResetColor();
             }
         }
 
