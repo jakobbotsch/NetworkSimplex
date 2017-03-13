@@ -109,7 +109,7 @@ namespace NetworkSimplex
 
         private class FlowGraphSolver
         {
-            private int _rootNode = 'g' - 'a';
+            private int _rootNode;
             private readonly FlowGraph _graph;
             private readonly NodeState[] _nodeStates;
             private readonly ArcState[] _arcStates;
@@ -168,6 +168,7 @@ namespace NetworkSimplex
                     if (nodeArcIndex == 0)
                     {
                         nodeState.Supply = node.Supply;
+                        nodeState.TreeArcs = new List<int>();
                     }
                     else
                     {
@@ -198,12 +199,19 @@ namespace NetworkSimplex
                         ref NodeState neiState = ref nodeStates[neiIndex];
                         if (neiState.Tag == tag)
                         {
-                            // Non-tree edge. Compute slack.
-                            // SlackIJ = dualI + costIJ - dualJ
-                            if (arc.Source == nodeIndex)
-                                arcState.Value = nodeState.DualValue + arc.Cost - neiState.DualValue;
+                            if (arcState.IsTree)
+                            {
+                                nodeState.TreeArcs.Add(arcIndex);
+                            }
                             else
-                                arcState.Value = neiState.DualValue + arc.Cost - nodeState.DualValue;
+                            {
+                                // Non-tree edge. Compute slack.
+                                // SlackIJ = dualI + costIJ - dualJ
+                                if (arc.Source == nodeIndex)
+                                    arcState.Value = nodeState.DualValue + arc.Cost - neiState.DualValue;
+                                else
+                                    arcState.Value = neiState.DualValue + arc.Cost - nodeState.DualValue;
+                            }
 
                             continue;
                         }
@@ -212,6 +220,7 @@ namespace NetworkSimplex
                         neiState.Tag = tag;
                         neiState.ParentArcIndex = arcIndex;
                         arcState.IsTree = true;
+                        nodeState.TreeArcs.Add(arcIndex);
 
                         // Dual feasibility condition states, for edge (i, j):
                         // dualJ - dualI = costIJ
@@ -376,17 +385,14 @@ namespace NetworkSimplex
             private bool TagSubTree(int leavingArcIndex)
             {
                 FlowNode[] nodes = _graph._nodes;
-                int[] nodeArcs = _graph._nodeArcs;
                 FlowArc[] arcs = _graph._arcs;
                 NodeState[] nodeStates = _nodeStates;
                 ArcState[] arcStates = _arcStates;
                 Stack<int> stack = _stack;
 
                 FlowArc leavingArc = arcs[leavingArcIndex];
-                ref ArcState leavingArcState = ref arcStates[leavingArcIndex];
 
-                leavingArcState.IsTree = false;
-
+                nodeStates[leavingArc.Source].TreeArcs.Remove(leavingArcIndex);
                 int tag = ++_tag;
                 int count = 0;
 
@@ -400,14 +406,13 @@ namespace NetworkSimplex
 
                     int nodeIndex = stack.Pop();
                     FlowNode node = nodes[nodeIndex];
+                    ref NodeState nodeState = ref nodeStates[nodeIndex];
 
-                    for (int i = node.ArcsIndex, j = node.ArcsIndex + node.CountIn + node.CountOut; i < j; i++)
+                    List<int> treeArcs = nodeState.TreeArcs;
+                    for (int i = 0; i < treeArcs.Count; i++)
                     {
-                        int neiArcIndex = nodeArcs[i];
+                        int neiArcIndex = treeArcs[i];
                         ref ArcState neiArcState = ref arcStates[neiArcIndex];
-
-                        if (!neiArcState.IsTree)
-                            continue;
 
                         FlowArc neiArc = arcs[neiArcIndex];
                         int neiNodeIndex = neiArc.Source == nodeIndex ? neiArc.Target : neiArc.Source;
@@ -421,7 +426,7 @@ namespace NetworkSimplex
                     }
                 }
 
-                leavingArcState.IsTree = true;
+                nodeStates[leavingArc.Source].TreeArcs.Add(leavingArcIndex);
                 return count * 2 <= nodes.Length;
             }
 
@@ -469,6 +474,8 @@ namespace NetworkSimplex
                 // Disconnect the sub trees.
                 leavingArcState.IsTree = false;
                 leavingArcState.Value = 0;
+                nodeStates[leavingArc.Source].TreeArcs.Remove(leavingArcIndex);
+                nodeStates[leavingArc.Target].TreeArcs.Remove(leavingArcIndex);
 
                 // Update dual slacks for crossing non-tree edges
                 int tag = ++_tag;
@@ -549,6 +556,8 @@ namespace NetworkSimplex
                 // Reconnect sub trees with new tree edge.
                 enteringArcState.IsTree = true;
                 enteringArcState.Value = flow;
+                nodeStates[enteringArc.Source].TreeArcs.Add(enteringArcIndex);
+                nodeStates[enteringArc.Target].TreeArcs.Add(enteringArcIndex);
 
                 return true;
             }
@@ -644,6 +653,7 @@ namespace NetworkSimplex
                 public int Tag { get; set; }
                 public int SubTreeTag { get; set; }
                 public int ParentArcIndex { get; set; }
+                public List<int> TreeArcs { get; set; }
             }
 
             [StructLayout(LayoutKind.Auto)]
