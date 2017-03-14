@@ -115,6 +115,8 @@ namespace NetworkSimplex
             private readonly ArcState[] _arcStates;
             private readonly Stack<int> _stack = new Stack<int>();
             private readonly List<int> _cycle = new List<int>();
+            private readonly int[] _pivotHeap;
+            private int _pivotHeapCount;
             private int _tag;
 
             public FlowGraphSolver(FlowGraph graph)
@@ -122,6 +124,9 @@ namespace NetworkSimplex
                 _graph = graph;
                 _nodeStates = new NodeState[graph._nodes.Length];
                 _arcStates = new ArcState[graph._arcs.Length];
+                _pivotHeap = new int[graph._arcs.Length];
+                for (int i = 0; i < _arcStates.Length; i++)
+                    _arcStates[i].HeapIndex = -1;
             }
 
             public FlowGraphSolution Solve()
@@ -185,6 +190,8 @@ namespace NetworkSimplex
                         else
                             arcState.Value = supply = nodeStates[arc.Source].Supply;
 
+                        UpdatePivotArc(arcIndex);
+
                         // In any case we move the supply from neighbor to root
                         nodeState.Supply += supply;
                     }
@@ -211,6 +218,8 @@ namespace NetworkSimplex
                                     arcState.Value = nodeState.DualValue + arc.Cost - neiState.DualValue;
                                 else
                                     arcState.Value = neiState.DualValue + arc.Cost - nodeState.DualValue;
+
+                                UpdatePivotArc(arcIndex);
                             }
 
                             continue;
@@ -248,29 +257,26 @@ namespace NetworkSimplex
                 FlowArc[] arcs = _graph._arcs;
                 ArcState[] arcStates = _arcStates;
 
-                for (int i = 0; i < arcs.Length; i++)
+                if (_pivotHeapCount > 0)
                 {
-                    if (arcStates[i].IsTree || arcStates[i].Value >= 0)
-                        continue;
-
-                    if (!PrimalPivot(i))
-                        return new FlowGraphSolution(SolutionType.Unbounded, Array.Empty<double>(), iter);
+                    int bestArcIndex = ExtractPivotArc();
+                    ref ArcState bestArcState = ref arcStates[bestArcIndex];
+                    // Note: bestArcState is changed by the pivot
+                    if (!bestArcState.IsTree)
+                    {
+                        if (!PrimalPivot(bestArcIndex))
+                            return new FlowGraphSolution(SolutionType.Unbounded, Array.Empty<double>(), iter);
+                    }
+                    else
+                    {
+                        if (!DualPivot(bestArcIndex))
+                            return new FlowGraphSolution(SolutionType.Infeasible, Array.Empty<double>(), iter);
+                    }
 
                     return null;
                 }
 
-                for (int i = 0; i < arcs.Length; i++)
-                {
-                    if (!arcStates[i].IsTree || arcStates[i].Value >= 0)
-                        continue;
-
-                    if (!DualPivot(i))
-                        return new FlowGraphSolution(SolutionType.Infeasible, Array.Empty<double>(), iter);
-
-                    return null;
-                }
-
-                return new FlowGraphSolution(SolutionType.Feasible, arcStates.Select(a => a.IsTree ? a.Value : 0).ToArray(), iter);
+                return new FlowGraphSolution(SolutionType.Feasible, arcStates.Select(a => a.IsTree ? a.Value : 0).ToArray(), iter - 1);
             }
 
             /// <summary>
@@ -405,15 +411,12 @@ namespace NetworkSimplex
                     count++;
 
                     int nodeIndex = stack.Pop();
-                    FlowNode node = nodes[nodeIndex];
                     ref NodeState nodeState = ref nodeStates[nodeIndex];
 
                     List<int> treeArcs = nodeState.TreeArcs;
                     for (int i = 0; i < treeArcs.Count; i++)
                     {
                         int neiArcIndex = treeArcs[i];
-                        ref ArcState neiArcState = ref arcStates[neiArcIndex];
-
                         FlowArc neiArc = arcs[neiArcIndex];
                         int neiNodeIndex = neiArc.Source == nodeIndex ? neiArc.Target : neiArc.Source;
                         ref NodeState neiState = ref nodeStates[neiNodeIndex];
@@ -469,6 +472,8 @@ namespace NetworkSimplex
                         prev = arc.Source;
                         arcState.Value -= flow;
                     }
+
+                    UpdatePivotArc(arcIndex);
                 }
 
                 // Disconnect the sub trees.
@@ -476,6 +481,7 @@ namespace NetworkSimplex
                 leavingArcState.Value = 0;
                 nodeStates[leavingArc.Source].TreeArcs.Remove(leavingArcIndex);
                 nodeStates[leavingArc.Target].TreeArcs.Remove(leavingArcIndex);
+                UpdatePivotArc(leavingArcIndex);
 
                 // Update dual slacks for crossing non-tree edges
                 int tag = ++_tag;
@@ -539,7 +545,10 @@ namespace NetworkSimplex
                         {
                             // Update dual slack if this non-tree edge crosses between the sub-trees
                             if ((nodeState.SubTreeTag == subTreeTag) != (neiState.SubTreeTag == subTreeTag))
+                            {
                                 arcState.Value += startInSubTreeIncrease * (arc.Source == nodeIndex ? 1 : -1);
+                                UpdatePivotArc(arcIndex);
+                            }
 
                             continue;
                         }
@@ -558,6 +567,7 @@ namespace NetworkSimplex
                 enteringArcState.Value = flow;
                 nodeStates[enteringArc.Source].TreeArcs.Add(enteringArcIndex);
                 nodeStates[enteringArc.Target].TreeArcs.Add(enteringArcIndex);
+                UpdatePivotArc(enteringArcIndex);
 
                 return true;
             }
@@ -645,6 +655,128 @@ namespace NetworkSimplex
                 return true;
             }
 
+            // The pivots are selected with a binary heap.
+            private int ExtractPivotArc()
+            {
+                int best = _pivotHeap[0];
+                _pivotHeapCount--;
+                if (_pivotHeapCount > 0)
+                    BubbleDown(0, _pivotHeap[_pivotHeapCount]);
+
+                _arcStates[best].HeapIndex = -1;
+
+                return best;
+            }
+
+            private void UpdatePivotArc(int value)
+            {
+                ref ArcState arcState = ref _arcStates[value];
+                int heapIndex = arcState.HeapIndex;
+                if (heapIndex == -1)
+                {
+                    if (arcState.Value < 0)
+                    {
+                        BubbleUp(_pivotHeapCount, value);
+                        _pivotHeapCount++;
+                    }
+                }
+                else
+                {
+                    // If new value positive then remove from heap
+                    if (arcState.Value >= 0)
+                    {
+                        arcState.HeapIndex = -1;
+                        _pivotHeapCount--;
+
+                        if (heapIndex == _pivotHeapCount)
+                            return;
+
+                        value = _pivotHeap[_pivotHeapCount];
+                    }
+
+                    if (heapIndex == 0 || ComparePivotArcs(value, (heapIndex - 1) / 2) <= 0)
+                        BubbleDown(heapIndex, value); // Largest or smaller than parent, try bubble down
+                    else
+                        BubbleUp(heapIndex, value); // Larger than parent, try bubble up
+                }
+            }
+
+            private void BubbleUp(int index, int value)
+            {
+                ArcState[] arcStates = _arcStates;
+                int[] pivotHeap = _pivotHeap;
+                while (index != 0)
+                {
+                    // Parent at floor((index - 1) / 2)
+                    int parent = (index - 1) / 2;
+                    int parentVal = pivotHeap[parent];
+                    if (ComparePivotArcs(value, parentVal) <= 0)
+                        break; // Item is smaller than parent
+
+                    pivotHeap[index] = parentVal;
+                    arcStates[parentVal].HeapIndex = index;
+                    index = parent;
+                }
+
+                pivotHeap[index] = value;
+                arcStates[value].HeapIndex = index;
+            }
+
+            private void BubbleDown(int index, int value)
+            {
+                ArcState[] arcStates = _arcStates;
+                int[] pivotHeap = _pivotHeap;
+                int count = _pivotHeapCount;
+
+                while (true)
+                {
+                    // Children are at index*2 + 1 and index*2 + 2
+                    int left = index * 2 + 1;
+                    if (left >= count)
+                        break;
+                    int leftVal = pivotHeap[left];
+                    int largestChild = left;
+                    int largestChildVal = leftVal;
+
+                    int right = left + 1;
+                    if (right < count)
+                    {
+                        int rightVal = pivotHeap[right];
+                        if (ComparePivotArcs(rightVal, leftVal) > 0)
+                        {
+                            largestChild = right;
+                            largestChildVal = rightVal;
+                        }
+                    }
+
+                    if (ComparePivotArcs(value, largestChildVal) >= 0)
+                        break; // Item is larger than both children
+
+                    pivotHeap[index] = largestChildVal;
+                    arcStates[largestChildVal].HeapIndex = index;
+                    index = largestChild;
+                }
+
+                pivotHeap[index] = value;
+                arcStates[value].HeapIndex = index;
+            }
+
+            private int ComparePivotArcs(int arc1Index, int arc2Index)
+            {
+                ArcState[] arcStates = _arcStates;
+                ref ArcState arc1State = ref arcStates[arc1Index];
+                ref ArcState arc2State = ref arcStates[arc2Index];
+
+                if (arc1State.IsTree != arc2State.IsTree)
+                    return !arc1State.IsTree ? 1 : -1;
+
+                if (arc1State.Value < arc2State.Value)
+                    return 1;
+                if (arc1State.Value > arc2State.Value)
+                    return -1;
+                return 0;
+            }
+
             [StructLayout(LayoutKind.Auto)]
             private struct NodeState
             {
@@ -661,6 +793,7 @@ namespace NetworkSimplex
             {
                 public bool IsTree { get; set; }
                 public double Value { get; set; }
+                public int HeapIndex { get; set; }
             }
         }
     }
